@@ -1,0 +1,104 @@
+#!/bin/bash
+usage() {
+  cat <<EOF
+Usage: $0 [options]
+  -p    Package name
+  -b    Switch to this branch, instead of \$package-\$version
+  -i    Install package after building
+EOF
+}
+
+REPO_BASE="${HOME}/source/void-packages"
+UB="upstream"
+CORES="$( nproc )"
+
+CONF="${HOME}/.config/build-bump.conf"
+
+# shellcheck disable=SC1090
+[ -f "${CONF}" ] && source "${CONF}"
+
+while getopts "p:b:ih" opt; do
+  case "${opt}" in
+    p)
+      package="${OPTARG}"
+      ;;
+    b)
+      branch="${OPTARG}"
+      ;;
+    i)
+      install=1
+      ;;
+    \?|h)
+      usage
+      exit
+      ;;
+    *)
+      usage
+      exit
+      ;;
+  esac
+done
+
+# Package must be defined
+if [ -z "${package}" ]; then
+  usage
+  exit
+fi
+
+cd "${REPO_BASE}" || exit
+
+# Make sure master is up-to-date with upstream
+(
+  git checkout master
+  git fetch "${UB}" && git merge "${UB}/master" && git push origin master
+) > /dev/null 2>&1
+
+current=
+new=
+
+# Loop through all found versions, use the last
+while read -r c _ n ; do 
+  if [ -z "${c}" ]; then
+    echo "No updates for ${package}"
+    exit
+  fi
+  current="${c}"
+  new="${n}"
+done <<<"$( ./xbps-src update-check "${package}" )"
+
+current=${current/#${package}-/}
+new=${new/#${package}-/}
+template="srcpkgs/${package}/template"
+
+echo "Updating ${package} from ${current} to ${new}"
+
+if [ -n "${branch}" ]; then
+  if [ -z "$( git branch --list "${branch}" )" ]; then
+    _args="-b"
+  fi
+else
+  branch="${package}-${new}"
+  _args="-b"
+fi
+
+git checkout "${_args}" "${branch}" || exit
+
+# Update the version, reset revision
+sed -e "s/version=${current}/version=${new}/"\
+    -e "s/revision=.*/revision=1/"\
+    -i "${template}"
+
+xgensum -f -i "${template}" || exit
+
+"${REPO_BASE}/xbps-src" check -j "${CORES}" "${package}" || exit
+"${REPO_BASE}/xbps-src" pkg -j "${CORES}" "${package}" || exit
+xlint "${template}" || exit
+
+if ((install)); then
+  xi "${package}"
+  read -n 1 -s -r -p "Test the package, press any key to continue"
+fi
+
+xbump "${package}"
+
+git push --set-upstream origin "${package}-${new}"
