@@ -53,6 +53,10 @@ cd "${REPO_BASE}" || exit
   git fetch "${UB}" && git merge "${UB}/master" && git push origin master
 ) > /dev/null 2>&1
 
+if [ -n "${branch}" ]; then
+  git checkout "${branch}" || exit
+fi
+
 current=
 new=
 
@@ -72,16 +76,10 @@ template="srcpkgs/${package}/template"
 
 echo "Updating ${package} from ${current} to ${new}"
 
-if [ -n "${branch}" ]; then
-  if [ -z "$( git branch --list "${branch}" )" ]; then
-    _args="-b"
-  fi
-else
+if [ -z "${branch}" ]; then
   branch="${package}-${new}"
-  _args="-b"
+  git checkout -b "${branch}" || exit
 fi
-
-git checkout "${_args}" "${branch}" || exit
 
 # Update the version, reset revision
 sed -e "s/version=${current}/version=${new}/"\
@@ -101,4 +99,4 @@ fi
 
 xbump "${package}"
 
-git push --set-upstream origin "${package}-${new}"
+git push --set-upstream origin "${branch}"
