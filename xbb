@@ -1,14 +1,17 @@
 #!/bin/bash
+# vim: softtabstop=2 shiftwidth=2 expandtab
+
 usage() {
   cat <<EOF
-Usage: $0 [options]
-  -p    Package name
+Usage: $0 [options] <package> [packages...]
   -b    Switch to this branch, instead of \$package-\$version
+  -n    Skip package checks
+  -K    Perform more extensive tests
   -i    Install package after building
 EOF
 }
 
-REPO_BASE="${HOME}/source/void-packages"
+REPO_BASE="$(xdistdir)" || exit
 UB="upstream"
 CORES="$( nproc )"
 
@@ -17,13 +20,16 @@ CONF="${HOME}/.config/build-bump.conf"
 # shellcheck disable=SC1090
 [ -f "${CONF}" ] && source "${CONF}"
 
-while getopts "p:b:ih" opt; do
+while getopts "b:BKnih" opt; do
   case "${opt}" in
-    p)
-      package="${OPTARG}"
-      ;;
     b)
       branch="${OPTARG}"
+      ;;
+    K)
+      fullcheck=1
+      ;;
+    n)
+      nocheck=1
       ;;
     i)
       install=1
@@ -39,10 +45,24 @@ while getopts "p:b:ih" opt; do
   esac
 done
 
-# Package must be defined
-if [ -z "${package}" ]; then
+while [ "${OPTIND}" -gt 1 ]; do
+  shift
+  OPTIND="$((OPTIND - 1))"
+done
+
+# At least one package is required
+if [ "$#" -lt 1 ]; then
   usage
-  exit
+  exit 1
+fi
+
+# Determine the level of checks to run
+if ((fullcheck)); then
+  PKGCHECK="-K"
+elif ((nocheck)); then
+  PKGCHECK=""
+else
+  PKGCHECK="-Q"
 fi
 
 cd "${REPO_BASE}" || exit
@@ -53,50 +73,57 @@ cd "${REPO_BASE}" || exit
   git fetch "${UB}" && git merge "${UB}/master" && git push origin master
 ) > /dev/null 2>&1
 
+# If a branch is specified, switch to it
 if [ -n "${branch}" ]; then
   git checkout "${branch}" || exit
 fi
 
-current=
-new=
+while [ "$#" -gt 0 ]; do
+  package="$1"
+  shift
 
-# Loop through all found versions, use the last
-while read -r c _ n ; do 
-  if [ -z "${c}" ]; then
-    echo "No updates for ${package}"
-    exit
+  current=
+  new=
+
+  # Loop through all found versions, use the last
+  while read -r c _ n ; do
+    if [ -z "${c}" ]; then
+      echo "No updates for ${package}"
+      exit
+    fi
+    current="${c}"
+    new="${n}"
+  done <<<"$( ./xbps-src update-check "${package}" )"
+
+  current=${current/#${package}-/}
+  new=${new/#${package}-/}
+  template="srcpkgs/${package}/template"
+
+  echo "Updating ${package} from ${current} to ${new}"
+
+  if [ -z "${branch}" ]; then
+    git checkout -b "${package}-${new}" || exit
   fi
-  current="${c}"
-  new="${n}"
-done <<<"$( ./xbps-src update-check "${package}" )"
 
-current=${current/#${package}-/}
-new=${new/#${package}-/}
-template="srcpkgs/${package}/template"
+  # Update the version, reset revision
+  sed -e "s/version=${current}/version=${new}/"\
+      -e "s/revision=.*/revision=1/"\
+      -i "${template}"
 
-echo "Updating ${package} from ${current} to ${new}"
+  xgensum -f -i "${template}" || exit
 
-if [ -z "${branch}" ]; then
-  branch="${package}-${new}"
-  git checkout -b "${branch}" || exit
-fi
+  xlint "${template}" || exit
 
-# Update the version, reset revision
-sed -e "s/version=${current}/version=${new}/"\
-    -e "s/revision=.*/revision=1/"\
-    -i "${template}"
+  "${REPO_BASE}/xbps-src" pkg ${PKGCHECK} -j "${CORES}" "${package}" || exit
 
-xgensum -f -i "${template}" || exit
+  if ((install)); then
+    xi "${package}"
+    read -n 1 -s -r -p "Test the package, press any key to continue"
+  fi
 
-"${REPO_BASE}/xbps-src" check -j "${CORES}" "${package}" || exit
-"${REPO_BASE}/xbps-src" pkg -j "${CORES}" "${package}" || exit
-xlint "${template}" || exit
+  xbump "${package}"
 
-if ((install)); then
-  xi "${package}"
-  read -n 1 -s -r -p "Test the package, press any key to continue"
-fi
-
-xbump "${package}"
-
-git push --set-upstream origin "${branch}"
+  if [ -z "${branch}" ]; then
+    git push --set-upstream origin "${package}-${new}"
+  fi
+done
